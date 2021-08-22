@@ -26,17 +26,21 @@ class LatentSpaceVisualizer(Callback):
 
         features = torch.Tensor().to(pl_module.device)
         labels = torch.Tensor().to(pl_module.device)
-        for x, y in dataloader:
-            x = x.to(pl_module.device)
-            y = y.to(pl_module.device)
-            remainings = max(0, self.samples - features.size(0))
-            if remainings < 1:
-                break
 
-            labels = torch.cat([labels, y[:remainings]], 0)
-            features = torch.cat(
-                [features, pl_module.encode(x)[:remainings]], 0)
+        with torch.no_grad():
+            pl_module.eval()
+            for x, y in dataloader:
+                x = x.to(pl_module.device)
+                y = y.to(pl_module.device)
+                remainings = max(0, self.samples - features.size(0))
+                if remainings < 1:
+                    break
 
+                labels = torch.cat([labels, y[:remainings]], 0)
+                features = torch.cat(
+                    [features, pl_module.encode(x)[:remainings]], 0)
+                    
+        pl_module.train()
         str_title = f'{pl_module.__class__.__name__}_latent_space'
         writer.add_embedding(features, metadata=labels,
                              tag=str_title, global_step=trainer.global_step)

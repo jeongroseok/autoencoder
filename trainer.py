@@ -1,6 +1,7 @@
 import pytorch_lightning as pl
 from pl_bolts.datamodules import MNISTDataModule
 from pl_examples import _DATASETS_PATH
+from torchvision import transforms as transform_lib
 from torchvision.datasets.mnist import MNIST
 
 from callbacks import LatentDimInterpolator, LatentSpaceVisualizer
@@ -10,13 +11,33 @@ from utils import set_persistent_workers
 
 def main(args=None):
     set_persistent_workers(MNISTDataModule)
-    datamodule = MNISTDataModule(_DATASETS_PATH, num_workers=4,
-                                 batch_size=256, shuffle=False, drop_last=True)
-    model = AutoEncoder(256, datamodule.dims, lr=1e-4,
-                hidden_dim=2048, variational=False)  # VAE는 너무 작으면 학습이 안됨
+    input_height = 32
+    input_channel = 1
+    transforms = transform_lib.Compose([
+        transform_lib.Resize(input_height),
+        transform_lib.ToTensor(),
+        transform_lib.Normalize(mean=(0.5, ), std=(0.5, )),
+    ])
+    datamodule = MNISTDataModule(
+        _DATASETS_PATH,
+        num_workers=4,
+        batch_size=256,
+        shuffle=False,
+        drop_last=True,
+        train_transforms=transforms,
+        val_transforms=transforms,
+        test_transforms=transforms,
+    )
+
+    model = AutoEncoder(
+        input_height=input_height,
+        input_channel=input_channel,
+        latent_dim=16,
+        variational=True
+    )
 
     dataset = MNIST(_DATASETS_PATH, False,
-                    transform=datamodule.default_transforms())
+                    transform=transforms)
     callbacks = [
         LatentSpaceVisualizer(2500),
         LatentDimInterpolator(dataset),
