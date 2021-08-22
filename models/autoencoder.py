@@ -21,7 +21,6 @@ class AutoEncoder(pl.LightningModule):
             enc_type: str = 'resnet18',
             first_conv: bool = False,
             maxpool1: bool = False,
-            enc_out_dim: int = 512,
             latent_dim: int = 256,
             lr: float = 1e-4,
             adam_beta1: float = 0.9,
@@ -34,6 +33,10 @@ class AutoEncoder(pl.LightningModule):
         self.criterion_kld = kl_loss
 
         valid_encoders = {
+            'resnet9': {
+                'enc': resnet9_encoder,
+                'dec': resnet9_decoder,
+            },
             'resnet18': {
                 'enc': resnet18_encoder,
                 'dec': resnet18_decoder,
@@ -55,7 +58,7 @@ class AutoEncoder(pl.LightningModule):
             self.decoder = valid_encoders[enc_type]['dec'](
                 latent_dim, input_height, input_channel, first_conv, maxpool1)
 
-        self.fc = nn.Linear(enc_out_dim, latent_dim *
+        self.fc = nn.Linear(self.encoder.out_features, latent_dim *
                             2 if variational else latent_dim)
 
     def sample(self, x):

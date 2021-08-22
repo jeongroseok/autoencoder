@@ -32,8 +32,9 @@ def main(args=None):
     model = AutoEncoder(
         input_height=input_height,
         input_channel=input_channel,
-        latent_dim=16,
-        variational=True
+        latent_dim=6,
+        variational=False,
+        enc_type='resnet9',
     )
 
     dataset = MNIST(_DATASETS_PATH, False,

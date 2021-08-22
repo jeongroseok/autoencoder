@@ -7,4 +7,4 @@
 ## 결과
 
 ![fig1](./imgs/result0.png)
-![fig1](./imgs/result1.png)
+![fig2](./imgs/result1.png)
