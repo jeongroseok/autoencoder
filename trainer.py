@@ -31,7 +31,7 @@ def main(args=None):
     model = AutoEncoder(
         img_dim=img_dim,
         latent_dim=16,
-        variational=False,
+        variational=True,
         enc_type='resnet9_8',
     )
 
