@@ -1,30 +1,17 @@
+import torch
 import numpy as np
-import torch
-from torch import Tensor, nn
-import torch
-from torch import nn
-from torch.nn import functional as F
+from torch import nn, Tensor
+from math import gcd
 
 
-class Interpolate(nn.Module):
-    """nn.Module wrapper for F.interpolate"""
-
-    def __init__(self, size=None, scale_factor=None):
-        super().__init__()
-        self.size, self.scale_factor = size, scale_factor
-
-    def forward(self, x):
-        return F.interpolate(x, size=self.size, scale_factor=self.scale_factor)
-
-
-def conv3x3(in_planes, out_planes, stride=1):
+def conv3x3(in_planes, out_planes, kernel_size=3, stride=1):
     """3x3 convolution with padding"""
-    return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False)
+    return nn.Conv2d(in_planes, out_planes, kernel_size=kernel_size, stride=stride, padding=1, bias=False)
 
 
-def conv1x1(in_planes, out_planes, stride=1):
+def conv1x1(in_planes, out_planes, kernel_size=1, stride=1):
     """1x1 convolution"""
-    return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
+    return nn.Conv2d(in_planes, out_planes, kernel_size=kernel_size, stride=stride, bias=False)
 
 
 def resize_conv3x3(in_planes, out_planes, scale=1):
@@ -32,7 +19,7 @@ def resize_conv3x3(in_planes, out_planes, scale=1):
     if scale == 1:
         return conv3x3(in_planes, out_planes)
     else:
-        return nn.Sequential(Interpolate(scale_factor=scale), conv3x3(in_planes, out_planes))
+        return nn.Sequential(nn.Upsample(scale_factor=scale), conv3x3(in_planes, out_planes))
 
 
 def resize_conv1x1(in_planes, out_planes, scale=1):
@@ -40,10 +27,14 @@ def resize_conv1x1(in_planes, out_planes, scale=1):
     if scale == 1:
         return conv1x1(in_planes, out_planes)
     else:
-        return nn.Sequential(Interpolate(scale_factor=scale), conv1x1(in_planes, out_planes))
+        return nn.Sequential(nn.Upsample(scale_factor=scale), conv1x1(in_planes, out_planes))
 
 
-class EncoderBlock(nn.Module):
+class ResnetBlock:
+    expansion: int
+
+
+class EncoderBlock(nn.Module, ResnetBlock):
     """
     ResNet block, copied from
     https://github.com/pytorch/vision/blob/master/torchvision/models/resnet.py#L35
@@ -53,7 +44,7 @@ class EncoderBlock(nn.Module):
 
     def __init__(self, inplanes, planes, stride=1, downsample=None):
         super().__init__()
-        self.conv1 = conv3x3(inplanes, planes, stride)
+        self.conv1 = conv3x3(inplanes, planes, stride=stride)
         self.bn1 = nn.BatchNorm2d(planes)
         self.relu = nn.ReLU(inplace=True)
         self.conv2 = conv3x3(planes, planes)
@@ -79,7 +70,7 @@ class EncoderBlock(nn.Module):
         return out
 
 
-class EncoderBottleneck(nn.Module):
+class EncoderBottleneck(nn.Module, ResnetBlock):
     """
     ResNet bottleneck, copied from
     https://github.com/pytorch/vision/blob/master/torchvision/models/resnet.py#L75
@@ -92,7 +83,7 @@ class EncoderBottleneck(nn.Module):
         width = planes  # this needs to change if we want wide resnets
         self.conv1 = conv1x1(inplanes, width)
         self.bn1 = nn.BatchNorm2d(width)
-        self.conv2 = conv3x3(width, width, stride)
+        self.conv2 = conv3x3(width, width, stride=stride)
         self.bn2 = nn.BatchNorm2d(width)
         self.conv3 = conv1x1(width, planes * self.expansion)
         self.bn3 = nn.BatchNorm2d(planes * self.expansion)
@@ -122,7 +113,7 @@ class EncoderBottleneck(nn.Module):
         return out
 
 
-class DecoderBlock(nn.Module):
+class DecoderBlock(nn.Module, ResnetBlock):
     """
     ResNet block, but convs replaced with resize convs, and channel increase is in
     second conv, not first
@@ -158,7 +149,7 @@ class DecoderBlock(nn.Module):
         return out
 
 
-class DecoderBottleneck(nn.Module):
+class DecoderBottleneck(nn.Module, ResnetBlock):
     """
     ResNet bottleneck, but convs replaced with resize convs
     """
@@ -201,21 +192,32 @@ class DecoderBottleneck(nn.Module):
 
 
 class ResNetEncoder(nn.Module):
-
-    def __init__(self, block, layers, input_channel, features_start: int = 64, first_conv=False, maxpool1=False):
+    def __init__(
+        self,
+        block: ResnetBlock,
+        layers: list[int],
+        latent_dim: int,
+        img_dim: tuple[int, int, int],
+        hidden_dim: int = 64,
+        first_conv: bool = False,
+        maxpool1: bool = False,
+        variational: bool = False,
+    ):
         super().__init__()
 
         self.inplanes = 64
+        self.latent_dim = latent_dim
+        self.hidden_dim = hidden_dim
         self.first_conv = first_conv
         self.maxpool1 = maxpool1
-        self.features_start = features_start
+        self.variational = variational
 
         if self.first_conv:
             self.conv1 = nn.Conv2d(
-                input_channel, self.inplanes, kernel_size=7, stride=2, padding=3, bias=False)
+                img_dim[0], self.inplanes, kernel_size=7, stride=2, padding=3, bias=False)
         else:
             self.conv1 = nn.Conv2d(
-                input_channel, self.inplanes, kernel_size=3, stride=1, padding=1, bias=False)
+                img_dim[0], self.inplanes, kernel_size=3, stride=1, padding=1, bias=False)
 
         self.bn1 = nn.BatchNorm2d(self.inplanes)
         self.relu = nn.ReLU(inplace=True)
@@ -225,24 +227,23 @@ class ResNetEncoder(nn.Module):
         else:
             self.maxpool = nn.MaxPool2d(kernel_size=1, stride=1)
 
-        self.layer1 = self._make_layer(block, features_start * 1, layers[0])
+        self.layer1 = self._make_layer(block, hidden_dim * 1, layers[0])
         self.layer2 = self._make_layer(
-            block, features_start * 2, layers[1], stride=2)
+            block, hidden_dim * 2, layers[1], stride=2)
         self.layer3 = self._make_layer(
-            block, features_start * 4, layers[2], stride=2)
+            block, hidden_dim * 4, layers[2], stride=2)
         self.layer4 = self._make_layer(
-            block, features_start * 8, layers[3], stride=2)
+            block, hidden_dim * 8, layers[3], stride=2)
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Linear(hidden_dim * 8,
+                            latent_dim * (2 if variational else 1))
 
-    @property
-    def out_features(self):
-        return self.features_start * 8
-
-    def _make_layer(self, block, planes, blocks, stride=1):
+    def _make_layer(self, block: ResnetBlock, planes, blocks, stride=1):
         downsample = None
         if stride != 1 or self.inplanes != planes * block.expansion:
             downsample = nn.Sequential(
-                conv1x1(self.inplanes, planes * block.expansion, stride),
+                conv1x1(self.inplanes, planes *
+                        block.expansion, stride=stride),
                 nn.BatchNorm2d(planes * block.expansion),
             )
 
@@ -267,7 +268,16 @@ class ResNetEncoder(nn.Module):
 
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
-        return x
+        x = self.fc(x)
+
+        if self.variational:
+            mu = x[..., :self.latent_dim]
+            logvar = x[..., self.latent_dim:]
+            std = torch.exp(0.5 * logvar)
+            eps = torch.randn_like(std)
+            return mu + eps * std
+        else:
+            return x
 
 
 class ResNetDecoder(nn.Module):
@@ -275,47 +285,58 @@ class ResNetDecoder(nn.Module):
     Resnet in reverse order
     """
 
-    def __init__(self, block, layers, latent_dim, input_height, input_channel, features_end: int = 64, first_conv=False, maxpool1=False):
+    def __init__(
+        self,
+        block: ResnetBlock,
+        layers,
+        latent_dim,
+        img_dim: tuple[int, int, int],
+        hidden_dim: int = 64,
+        first_conv=False,
+        maxpool1=False
+    ):
         super().__init__()
-
+        img_dim = np.asarray(img_dim)
         self.expansion = block.expansion
-        self.inplanes = features_end * 8 * block.expansion
+        self.inplanes = hidden_dim * 8 * block.expansion
+        self.img_dim = img_dim
+        self.hidden_dim = hidden_dim
         self.first_conv = first_conv
         self.maxpool1 = maxpool1
-        self.input_height = input_height
-        self.input_channel = input_channel
-        self.features_end = features_end
 
         self.upscale_factor = 8
 
-        self.linear = nn.Linear(latent_dim, self.inplanes * 4 * 4)
+        self.init_dim = (img_dim[1:] / gcd(*img_dim[1:]) * 4).astype(np.int)
+
+        self.linear = nn.Linear(
+            latent_dim, self.inplanes * np.prod(self.init_dim))
 
         self.layer1 = self._make_layer(
-            block, features_end * 4, layers[0], scale=2)
+            block, hidden_dim * 4, layers[0], scale=2)
         self.layer2 = self._make_layer(
-            block, features_end * 2, layers[1], scale=2)
-        self.layer3 = self._make_layer(block, features_end, layers[2], scale=2)
+            block, hidden_dim * 2, layers[1], scale=2)
+        self.layer3 = self._make_layer(block, hidden_dim, layers[2], scale=2)
 
         if self.maxpool1:
             self.layer4 = self._make_layer(
-                block, features_end, layers[3], scale=2)
+                block, hidden_dim, layers[3], scale=2)
             self.upscale_factor *= 2
         else:
-            self.layer4 = self._make_layer(block, features_end, layers[3])
+            self.layer4 = self._make_layer(block, hidden_dim, layers[3])
 
         if self.first_conv:
-            self.upscale = Interpolate(scale_factor=2)
+            self.upscale = nn.Upsample(scale_factor=2)
             self.upscale_factor *= 2
         else:
-            self.upscale = Interpolate(scale_factor=1)
+            self.upscale = nn.Upsample(scale_factor=1)
 
-        # interpolate after linear layer using scale factor
-        self.upscale1 = Interpolate(size=input_height // self.upscale_factor)
+        self.upscale1 = nn.Upsample(size=tuple(
+            img_dim[1:] // self.upscale_factor))
 
-        self.conv1 = nn.Conv2d(features_end * block.expansion, input_channel,
+        self.conv1 = nn.Conv2d(hidden_dim * block.expansion, img_dim[0],
                                kernel_size=3, stride=1, padding=1, bias=False)
 
-    def _make_layer(self, block, planes, blocks, scale=1):
+    def _make_layer(self, block: ResnetBlock, planes, blocks, scale=1):
         upsample = None
         if scale != 1 or self.inplanes != planes * block.expansion:
             upsample = nn.Sequential(
@@ -332,12 +353,10 @@ class ResNetDecoder(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x):
-        x = self.linear(x)
+        x: Tensor = self.linear(x)
 
-        # NOTE: replaced this by Linear(in_channels, 514 * 4 * 4)
-        # x = F.interpolate(x, scale_factor=4)
-
-        x = x.view(x.size(0), self.features_end * 8 * self.expansion, 4, 4)
+        x = x.view(x.size(0), self.hidden_dim *
+                   8 * self.expansion, *self.init_dim)
         x = self.upscale1(x)
 
         x = self.layer1(x)
@@ -350,104 +369,66 @@ class ResNetDecoder(nn.Module):
         return x
 
 
-def resnet9_encoder(input_channel, first_conv, maxpool1):
-    return ResNetEncoder(EncoderBlock, [1, 1, 1, 1], input_channel, 16, first_conv=first_conv, maxpool1=maxpool1)
+__valid_setups = {
+    'resnet9': {
+        'enc_block': EncoderBlock,
+        'dec_block': DecoderBlock,
+        'layers': [1, 1, 1, 1],
+        'hidden_dim': 16,
+    },
+    'resnet9_8': {
+        'enc_block': EncoderBlock,
+        'dec_block': DecoderBlock,
+        'layers': [1, 1, 1, 1],
+        'hidden_dim': 8,
+    },
+    'resnet9_32': {
+        'enc_block': EncoderBlock,
+        'dec_block': DecoderBlock,
+        'layers': [1, 1, 1, 1],
+        'hidden_dim': 32,
+    },
+    'resnet18': {
+        'enc_block': EncoderBlock,
+        'dec_block': DecoderBlock,
+        'layers': [2, 2, 2, 2],
+        'hidden_dim': 64,
+    },
+    'resnet50': {
+        'enc_block': EncoderBottleneck,
+        'dec_block': DecoderBottleneck,
+        'layers': [3, 4, 6, 3],
+        'hidden_dim': 64,
+    },
+}
 
 
-def resnet9_decoder(latent_dim, input_height, input_channel, first_conv, maxpool1):
-    return ResNetDecoder(DecoderBlock, [1, 1, 1, 1], latent_dim, input_height, input_channel, 16, first_conv=first_conv, maxpool1=maxpool1)
+def create_encoder(enc_type: str, latent_dim, img_dim, first_conv, maxpool1, variational):
+    if enc_type not in __valid_setups:
+        enc_type = 'resnet18'
+    setups = __valid_setups[enc_type]
+    return ResNetEncoder(
+        setups['enc_block'],
+        setups['layers'],
+        latent_dim,
+        img_dim,
+        setups['hidden_dim'],
+        first_conv,
+        maxpool1,
+        variational
+    )
 
 
-def resnet18_encoder(input_channel, first_conv, maxpool1):
-    return ResNetEncoder(EncoderBlock, [2, 2, 2, 2], input_channel, first_conv=first_conv, maxpool1=maxpool1)
-
-
-def resnet18_decoder(latent_dim, input_height, input_channel, first_conv, maxpool1):
-    return ResNetDecoder(DecoderBlock, [2, 2, 2, 2], latent_dim, input_height, input_channel, first_conv=first_conv, maxpool1=maxpool1)
-
-
-def resnet50_encoder(input_channel, first_conv, maxpool1):
-    return ResNetEncoder(EncoderBottleneck, [3, 4, 6, 3], input_channel, first_conv=first_conv, maxpool1=maxpool1)
-
-
-def resnet50_decoder(latent_dim, input_height, input_channel, first_conv, maxpool1):
-    return ResNetDecoder(DecoderBottleneck, [3, 4, 6, 3], latent_dim, input_height, input_channel, first_conv=first_conv, maxpool1=maxpool1)
-
-
-class Encoder(nn.Module):
-    def __init__(
-        self,
-        latent_dim: int,
-        img_dim: tuple[int, int, int],
-        first_hidden_dim: int = 256,
-        normalize: bool = True,
-        variational: bool = False,
-    ):
-        super().__init__()
-        self.latent_dim = latent_dim
-        self.variational = variational
-
-        def block(in_feat, out_feat, normalize: bool = normalize):
-            layers = [nn.Linear(in_feat, out_feat)]
-            if normalize:
-                layers.append(nn.BatchNorm1d(out_feat))
-            layers.append(nn.LeakyReLU(0.2))
-            return layers
-
-        self.fc = nn.Sequential(
-            nn.Flatten(),
-            *block(np.prod(img_dim), first_hidden_dim, False),
-            *block(first_hidden_dim, first_hidden_dim // 2),
-            *block(first_hidden_dim // 2, first_hidden_dim // 4),
-            nn.Linear(first_hidden_dim // 4, latent_dim *
-                      2 if variational else latent_dim),
-        )
-
-    def forward(self, x: Tensor):
-        x = self.fc(x)
-
-        if not self.variational:
-            return x
-
-        mu = x[..., :self.latent_dim]
-        lv = x[..., self.latent_dim:]
-
-        std = torch.exp(lv / 2)
-        p = torch.distributions.Normal(
-            torch.zeros_like(mu), torch.ones_like(std))
-        q = torch.distributions.Normal(mu, std)
-        z = q.rsample()
-
-        return p, q, z
-
-
-class Decoder(nn.Module):
-    def __init__(
-        self,
-        latent_dim: int,
-        img_dim: tuple[int, int, int],
-        first_hidden_dim: int = 256,
-        normalize: bool = True,
-    ):
-        super().__init__()
-        self.latent_dim = latent_dim
-
-        def block(in_feat, out_feat, normalize: bool = normalize):
-            layers = [nn.Linear(in_feat, out_feat)]
-            if normalize:
-                layers.append(nn.BatchNorm1d(out_feat))
-            layers.append(nn.LeakyReLU(0.2))
-            return layers
-
-        self.fc = nn.Sequential(
-            *block(latent_dim, first_hidden_dim // 4),
-            *block(first_hidden_dim // 4, first_hidden_dim // 2),
-            *block(first_hidden_dim // 2, first_hidden_dim),
-            nn.Linear(first_hidden_dim, np.prod(img_dim)),
-            nn.Tanh(),
-            nn.Unflatten(1, img_dim)
-        )
-
-    def forward(self, x: Tensor):
-        x_hat = self.fc(x)
-        return x_hat
+def create_decoder(enc_type: str, latent_dim, img_dim, first_conv, maxpool1):
+    if enc_type not in __valid_setups:
+        enc_type = 'resnet18'
+    setups = __valid_setups[enc_type]
+    return ResNetDecoder(
+        setups['dec_block'],
+        setups['layers'],
+        latent_dim,
+        img_dim,
+        setups['hidden_dim'],
+        first_conv,
+        maxpool1
+    )

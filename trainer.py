@@ -11,10 +11,9 @@ from utils import set_persistent_workers
 
 def main(args=None):
     set_persistent_workers(MNISTDataModule)
-    input_height = 32
-    input_channel = 1
+    img_dim = (1, 48, 32)
     transforms = transform_lib.Compose([
-        transform_lib.Resize(input_height),
+        transform_lib.Resize(img_dim[1:]),
         transform_lib.ToTensor(),
         transform_lib.Normalize(mean=(0.5, ), std=(0.5, )),
     ])
@@ -30,11 +29,10 @@ def main(args=None):
     )
 
     model = AutoEncoder(
-        input_height=input_height,
-        input_channel=input_channel,
-        latent_dim=6,
+        img_dim=img_dim,
+        latent_dim=16,
         variational=False,
-        enc_type='resnet9',
+        enc_type='resnet9_8',
     )
 
     dataset = MNIST(_DATASETS_PATH, False,
@@ -45,7 +43,7 @@ def main(args=None):
     ]
 
     trainer = pl.Trainer(
-        gpus=-1,
+        gpus=-1 if datamodule.num_workers > 0 else None,
         progress_bar_refresh_rate=5,
         max_epochs=1000,
         callbacks=callbacks

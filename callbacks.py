@@ -38,7 +38,7 @@ class LatentSpaceVisualizer(Callback):
 
                 labels = torch.cat([labels, y[:remainings]], 0)
                 features = torch.cat(
-                    [features, pl_module.encode(x)[:remainings]], 0)
+                    [features, pl_module.encoder(x)[:remainings]], 0)
                     
         pl_module.train()
         str_title = f'{pl_module.__class__.__name__}_latent_space'
@@ -80,11 +80,11 @@ class LatentDimInterpolator(Callback):
         yield points[:1, ...]
         with torch.no_grad():
             pl_module.eval()
-            z = pl_module.encode(points)
+            z = pl_module.encoder(points)
 
             for w in np.linspace(0, 1, self.steps - 2):
                 z_interpolated = torch.lerp(z[0], z[1], w).unsqueeze_(0)
-                yield pl_module.decode(z_interpolated)
+                yield pl_module.decoder(z_interpolated)
 
         pl_module.train()
         yield points[1:, ...]
